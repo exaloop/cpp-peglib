@@ -1638,8 +1638,8 @@ usr(std::function<size_t(const char *s, size_t n, SemanticValues &vs,
 }
 
 inline std::shared_ptr<Ope> ref(const Grammar &grammar, const std::string &name,
-                                const char *s, bool is_macro,
-                                const std::vector<std::shared_ptr<Ope>> &args) {
+                                const char *s = "", bool is_macro = false,
+                                const std::vector<std::shared_ptr<Ope>> &args = {}) {
   return std::make_shared<Reference>(grammar, name, s, is_macro, args);
 }
 
