@@ -40,6 +40,10 @@
 #if !defined(__cplusplus) || __cplusplus < 201703L
 #error "Requires complete C++17 support"
 #endif
+const std::string PEG_PREAMBLE = "PREAMBLE";
+const std::string PEG_NOPACKRAT = "__NOPACKRAT";
+const std::string PEG_PREDICATE = "__PREDICATE";
+
 
 namespace peg {
 
@@ -808,9 +812,9 @@ public:
   Context operator=(const Context &) = delete;
 
   template <typename T>
-  void packrat(const char *a_s, size_t def_id, size_t &len, std::any &val,
+  void packrat(const char *a_s, bool enable_memoize, size_t def_id, size_t &len, std::any &val,
                T fn) {
-    if (!enablePackratParsing) {
+    if (!enablePackratParsing || !enable_memoize) {
       fn(val);
       return;
     }
@@ -950,6 +954,9 @@ public:
  * Parser operators
  */
 class Ope {
+public:
+  std::string code; // Codon: block C++ code (code in { ... })
+
 public:
   struct Visitor;
 
@@ -1258,6 +1265,7 @@ private:
     }
   }
 
+public: // Codon: hack to allow access for printing
   std::vector<std::pair<char32_t, char32_t>> ranges_;
   bool negated_;
   bool ignore_case_;
@@ -2360,6 +2368,9 @@ public:
 
   bool eoi_check = true;
 
+  bool enable_memoize = true;
+  std::string predicate_code;
+
 private:
   friend class Reference;
   friend class ParserGenerator;
@@ -2430,6 +2441,58 @@ private:
   mutable std::once_flag assign_id_to_definition_init_;
   mutable std::once_flag definition_ids_init_;
   mutable std::unordered_map<void *, size_t> definition_ids_;
+};
+
+// Codon: recursively enable/disable packrat
+struct SetUpPackrat : public Ope::Visitor {
+  bool packrat;
+  std::unordered_set<std::string> *seen;
+
+  static bool check(std::unordered_set<std::string> *seen, const std::shared_ptr<Ope> &op) {
+    SetUpPackrat v;
+    v.seen = seen;
+    v.packrat = true;
+    op->accept(v);
+    return v.packrat;
+  };
+
+  void visit(Sequence &ope) override {
+    for (auto op : ope.opes_)
+      packrat &= check(seen, op);
+  }
+  void visit(PrioritizedChoice &ope) override {
+    for (auto op : ope.opes_)
+      packrat &= check(seen, op);
+  }
+  void visit(Repetition &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(AndPredicate &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(NotPredicate &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(CaptureScope &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(Capture &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(TokenBoundary &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(Ignore &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(WeakHolder &ope) override { packrat &= check(seen, ope.weak_.lock()); }
+  void visit(Holder &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(Reference &ope) override {
+    if (seen->find(ope.name_) != seen->end()) {
+      if (ope.rule_)
+        packrat &= ope.rule_->enable_memoize;
+      return;
+    }
+    seen->insert(ope.name_);
+    for (auto op : ope.args_)
+      packrat &= check(seen, op);
+    if (ope.rule_) {
+      if (auto op = ope.get_core_operator())
+        packrat &= check(seen, op);
+      packrat &= ope.rule_->enable_memoize;
+      if (!packrat)
+        ope.rule_->enable_memoize = false;
+    }
+  }
+  void visit(Whitespace &ope) override { packrat &= check(seen, ope.ope_); }
+  void visit(PrecedenceClimbing &ope) override { packrat &= check(seen, ope.atom_); }
+  void visit(Recovery &ope) override { packrat &= check(seen, ope.ope_); }
 };
 
 /*
@@ -2736,7 +2799,7 @@ inline size_t Holder::parse_core(const char *s, size_t n, SemanticValues &vs,
   size_t len;
   std::any val;
 
-  c.packrat(s, outer_->id, len, val, [&](std::any &a_val) {
+  c.packrat(s, outer_->enable_memoize, outer_->id, len, val, [&](std::any &a_val) {
     if (outer_->enter) { outer_->enter(c, s, n, dt); }
     auto &chvs = c.push_semantic_values_scope();
     auto se = scope_exit([&]() {
@@ -3241,27 +3304,27 @@ class ParserGenerator {
 public:
   static std::shared_ptr<Grammar> parse(const char *s, size_t n,
                                         const Rules &rules, std::string &start,
-                                        bool &enablePackratParsing, Log log) {
-    return get_instance().perform_core(s, n, rules, start, enablePackratParsing,
+                                        bool &enablePackratParsing, std::string &preamble, Log log) {
+    return get_instance().perform_core(s, n, rules, start, enablePackratParsing, preamble,
                                        log);
   }
 
   static std::shared_ptr<Grammar> parse(const char *s, size_t n,
-                                        std::string &start,
-                                        bool &enablePackratParsing, Log log) {
+                                        std::string &start, bool &enablePackratParsing,
+                                        std::string &preamble, Log log) {
     Rules dummy;
-    return parse(s, n, dummy, start, enablePackratParsing, log);
+    return parse(s, n, dummy, start, enablePackratParsing, preamble, log);
   }
 
   // For debuging purpose
   static Grammar &grammar() { return get_instance().g; }
 
-private:
   static ParserGenerator &get_instance() {
     static ParserGenerator instance;
     return instance;
   }
 
+private:
   ParserGenerator() {
     make_grammar();
     setup_actions();
@@ -3288,6 +3351,7 @@ private:
 
     std::set<std::string_view> captures_in_current_definition;
     bool enablePackratParsing = true;
+    std::string preamble;  // Codon: PREAMBLE code
 
     Data() : grammar(std::make_shared<Grammar>()) {}
   };
@@ -3295,11 +3359,16 @@ private:
   void make_grammar() {
     // Setup PEG syntax parser
     g["Grammar"] <= seq(g["Spacing"], oom(g["Definition"]), g["EndOfFile"]);
+    // Codon: Support for name <- rule { cpp_code }
     g["Definition"] <=
         cho(seq(g["Ignore"], g["IdentCont"], g["Parameters"], g["LEFTARROW"],
-                g["Expression"], opt(g["Instruction"])),
-            seq(g["Ignore"], g["Identifier"], g["LEFTARROW"], g["Expression"],
-                opt(g["Instruction"])));
+                g["TopExpression"], opt(g["Instruction"])),
+            seq(g["Ignore"], g["Identifier"], g["LEFTARROW"], g["TopExpression"],
+                opt(g["Instruction"])),
+            seq(g["Ignore"], g["IdentCont"], g["Spacing"], g["CppInstr"]));
+    g["TopExpression"] <=
+        seq(opt(g["SLASH"]), g["TopChoice"], zom(seq(g["SLASH"], g["TopChoice"])));
+    g["TopChoice"] <= seq(g["Sequence"], opt(g["CppInstr"]));
     g["Expression"] <= seq(g["Sequence"], zom(seq(g["SLASH"], g["Sequence"])));
     g["Sequence"] <= zom(cho(g["CUT"], g["Prefix"]));
     g["Prefix"] <= seq(opt(cho(g["AND"], g["NOT"])), g["SuffixWithLabel"]);
@@ -3395,8 +3464,8 @@ private:
     ~g["CLOSE"] <= seq(chr(')'), g["Spacing"]);
     g["DOT"] <= seq(chr('.'), g["Spacing"]);
 
-    g["CUT"] <= seq(lit(u8(u8"↑")), g["Spacing"]);
-    ~g["LABEL"] <= seq(cho(chr('^'), lit(u8(u8"⇑"))), g["Spacing"]);
+    g["CUT"] <= seq(chr('^'), g["Spacing"]);    // Codon: Change from ↑ to ^
+    ~g["LABEL"] <= seq(chr('@'), g["Spacing"]); // Codon: Change from ⇑ to @
 
     ~g["Spacing"] <= zom(cho(g["Space"], g["Comment"]));
     g["Comment"] <=
@@ -3465,6 +3534,11 @@ private:
     // No Ast node optimazation instruction
     g["NoAstOpt"] <= seq(lit("no_ast_opt"), g["SpacesZom"]);
 
+    // Codon: C++ code support
+    g["CppInstr"] <= seq(g["CppCode"], g["Spacing"]);
+    g["CppCode"] <= seq(chr('{'), zom(g["CppChar"]), chr('}'));
+    g["CppChar"] <= cho(g["CppCode"], seq(npd(chr('{')), npd(chr('}')), dot()));
+
     // Set definition names
     for (auto &x : g) {
       x.second.name = x.first;
@@ -3475,9 +3549,33 @@ private:
     g["Definition"] = [&](const SemanticValues &vs, std::any &dt) {
       auto &data = *std::any_cast<Data *>(dt);
 
+      // Codon: handle PREAMBLE and other special directives
+      if (vs.choice() == 2) {
+        auto name = std::any_cast<std::string>(vs[1]);
+        auto code = std::any_cast<std::string>(vs[2]);
+        if (name == PEG_PREAMBLE) {
+          data.preamble = code;
+        } else if (name.size() > PEG_PREDICATE.size() &&
+          name.substr(name.size() - PEG_PREDICATE.size()) == PEG_PREDICATE) {
+          name = name.substr(0, name.size() - PEG_PREDICATE.size());
+          auto &grammar = *data.grammar;
+          assert(grammar.count(name) > 0 && "predicate defined before the rule");
+          grammar[name].predicate_code = code;
+        }
+        return;
+      }
+
       auto is_macro = vs.choice() == 0;
       auto ignore = std::any_cast<bool>(vs[0]);
       auto name = std::any_cast<std::string>(vs[1]);
+
+      // Codon: handle PEG_NOPACKRAT
+      auto enable_memoize = true;
+      if (name.size() > PEG_NOPACKRAT.size() &&
+          name.substr(name.size() - PEG_NOPACKRAT.size()) == PEG_NOPACKRAT) {
+        enable_memoize = false;
+        name = name.substr(0, name.size() - PEG_NOPACKRAT.size());
+      }
 
       std::vector<std::string> params;
       std::shared_ptr<Ope> ope;
@@ -3521,6 +3619,7 @@ private:
         rule.ignoreSemanticValue = ignore;
         rule.is_macro = is_macro;
         rule.params = params;
+        rule.enable_memoize = enable_memoize;
 
         if (data.start.empty()) {
           data.start = rule.name;
@@ -3537,7 +3636,7 @@ private:
       data.captures_in_current_definition.clear();
     };
 
-    g["Expression"] = [&](const SemanticValues &vs) {
+    auto exprFn = [&](const SemanticValues &vs) {
       if (vs.size() == 1) {
         return std::any_cast<std::shared_ptr<Ope>>(vs[0]);
       } else {
@@ -3549,6 +3648,15 @@ private:
             std::make_shared<PrioritizedChoice>(opes);
         return ope;
       }
+    };
+    g["Expression"] = exprFn;
+    g["TopExpression"] = exprFn;
+    g["TopChoice"] = [&](const SemanticValues &vs) {
+      if (vs.size() > 1) {
+        auto op = std::any_cast<std::shared_ptr<Ope>>(vs[0]);
+        op->code = std::any_cast<std::string>(vs[1]);
+      }
+      return vs[0];
     };
 
     g["Sequence"] = [&](const SemanticValues &vs) {
@@ -3863,6 +3971,9 @@ private:
       return instruction;
     };
 
+    // Codon: C++ code
+    g["CppCode"] = [](const SemanticValues &vs) { return std::string(vs.sv()); };
+
     g["NoAstOpt"] = [](const SemanticValues &vs) {
       Instruction instruction;
       instruction.type = "no_ast_opt";
@@ -3916,9 +4027,10 @@ private:
     return true;
   }
 
+public: // Codon: enable public access
   std::shared_ptr<Grammar> perform_core(const char *s, size_t n,
                                         const Rules &rules, std::string &start,
-                                        bool &enablePackratParsing, Log log) {
+                                        bool &enablePackratParsing, std::string &preamble, Log log) {
     Data data;
     auto &grammar = *data.grammar;
 
@@ -4031,6 +4143,7 @@ private:
         WORD_DEFINITION_NAME,
         RECOVER_DEFINITION_NAME,
         start_rule.name,
+        "fstring"  // Codon: extra referenced rule
     };
 
     for (auto &[_, rule] : grammar) {
@@ -4127,10 +4240,18 @@ private:
       }
     }
 
+    // Codon: recursively disable packrat
+    std::unordered_set<std::string> seen;
+    for (auto &[name, rule] : grammar) {
+      auto packrat = SetUpPackrat::check(&seen, rule.get_core_operator());
+      if (!packrat)
+        rule.enable_memoize = false;
+    }
+
     // Set root definition
     start = data.start;
+    preamble = data.preamble;
     enablePackratParsing = data.enablePackratParsing;
-
     return data.grammar;
   }
 
@@ -4479,8 +4600,9 @@ public:
   operator bool() { return grammar_ != nullptr; }
 
   bool load_grammar(const char *s, size_t n, const Rules &rules) {
+    std::string preamble;
     grammar_ = ParserGenerator::parse(s, n, rules, start_,
-                                      enablePackratParsing_, log_);
+                                      enablePackratParsing_, preamble, log_);
     return grammar_ != nullptr;
   }
 
