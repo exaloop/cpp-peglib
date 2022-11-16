@@ -482,7 +482,7 @@ inline constexpr unsigned int operator"" _(const char *s, size_t l) {
  */
 class Context;
 
-struct SemanticValues : protected std::vector<std::any> {
+struct SemanticValues : public std::vector<std::any> {
   SemanticValues() = default;
   SemanticValues(Context *c) : c_(c) {}
 
