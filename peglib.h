@@ -804,7 +804,7 @@ public:
 
     assert(!value_stack_size);
     assert(!capture_scope_stack_size);
-    assert(cut_stack.empty());
+    // assert(cut_stack.empty());
   }
 
   Context(const Context &) = delete;
