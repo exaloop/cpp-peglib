@@ -381,27 +381,34 @@ template <typename T> T token_to_number_(std::string_view sv) {
 
 class Trie {
 public:
-  Trie() = default;
-  Trie(const Trie &) = default;
-
-  Trie(const std::vector<std::string> &items) {
+  Trie(const std::vector<std::string> &items, bool ignore_case)
+      : ignore_case_(ignore_case) {
+    size_t id = 0;
     for (const auto &item : items) {
+      const auto &s = ignore_case ? to_lower(item) : item;
       for (size_t len = 1; len <= item.size(); len++) {
         auto last = len == item.size();
-        std::string_view sv(item.data(), len);
+        std::string_view sv(s.data(), len);
         auto it = dic_.find(sv);
         if (it == dic_.end()) {
-          dic_.emplace(sv, Info{last, last});
+          dic_.emplace(sv, Info{last, last, id});
         } else if (last) {
           it->second.match = true;
         } else {
           it->second.done = false;
         }
       }
+      id++;
     }
   }
 
-  size_t match(const char *text, size_t text_len) const {
+  size_t match(const char *text, size_t text_len, size_t &id) const {
+    std::string lower_text;
+    if (ignore_case_) {
+      lower_text = to_lower(text);
+      text = lower_text.data();
+    }
+
     size_t match_len = 0;
     auto done = false;
     size_t len = 1;
@@ -411,7 +418,10 @@ public:
       if (it == dic_.end()) {
         done = true;
       } else {
-        if (it->second.match) { match_len = len; }
+        if (it->second.match) {
+          match_len = len;
+          id = it->second.id;
+        }
         if (it->second.done) { done = true; }
       }
       len += 1;
@@ -419,15 +429,27 @@ public:
     return match_len;
   }
 
+  size_t size() const { return dic_.size(); }
+
 private:
+  std::string to_lower(std::string s) const {
+    for (char &c : s) {
+      c = std::tolower(c);
+    }
+    return s;
+  }
+
   struct Info {
     bool done;
     bool match;
+    size_t id;
   };
 
   // TODO: Use unordered_map when heterogeneous lookup is supported in C++20
   // std::unordered_map<std::string, Info> dic_;
   std::map<std::string, Info, std::less<>> dic_;
+
+  bool ignore_case_;
 };
 
 /*-----------------------------------------------------------------------------
@@ -575,6 +597,7 @@ struct SemanticValues : public std::vector<std::any> {
 
 private:
   friend class Context;
+  friend class Dictionary;
   friend class Sequence;
   friend class PrioritizedChoice;
   friend class Repetition;
@@ -1010,6 +1033,9 @@ public:
     size_t len = static_cast<size_t>(-1);
 
     if (!for_label_) { c.cut_stack.push_back(false); }
+    auto se = scope_exit([&]() {
+      if (!for_label_) { c.cut_stack.pop_back(); }
+    });
 
     size_t id = 0;
     for (const auto &ope : opes_) {
@@ -1036,8 +1062,6 @@ public:
 
       id++;
     }
-
-    if (!for_label_) { c.cut_stack.pop_back(); }
 
     return len;
   }
@@ -1165,7 +1189,8 @@ public:
 
 class Dictionary : public Ope, public std::enable_shared_from_this<Dictionary> {
 public:
-  Dictionary(const std::vector<std::string> &v) : trie_(v) {}
+  Dictionary(const std::vector<std::string> &v, bool ignore_case)
+      : trie_(v, ignore_case) {}
 
   size_t parse_core(const char *s, size_t n, SemanticValues &vs, Context &c,
                     std::any &dt) const override;
@@ -1575,8 +1600,9 @@ inline std::shared_ptr<Ope> npd(const std::shared_ptr<Ope> &ope) {
   return std::make_shared<NotPredicate>(ope);
 }
 
-inline std::shared_ptr<Ope> dic(const std::vector<std::string> &v) {
-  return std::make_shared<Dictionary>(v);
+inline std::shared_ptr<Ope> dic(const std::vector<std::string> &v,
+                                bool ignore_case) {
+  return std::make_shared<Dictionary>(v, ignore_case);
 }
 
 inline std::shared_ptr<Ope> lit(std::string &&s) {
@@ -1695,6 +1721,8 @@ struct Ope::Visitor {
 };
 
 struct TraceOpeName : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   void visit(Sequence &) override { name_ = "Sequence"; }
   void visit(PrioritizedChoice &) override { name_ = "PrioritizedChoice"; }
   void visit(Repetition &) override { name_ = "Repetition"; }
@@ -1730,6 +1758,8 @@ private:
 };
 
 struct AssignIDToDefinition : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   void visit(Sequence &ope) override {
     for (auto op : ope.opes_) {
       op->accept(*this);
@@ -1758,6 +1788,8 @@ struct AssignIDToDefinition : public Ope::Visitor {
 };
 
 struct IsLiteralToken : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   void visit(PrioritizedChoice &ope) override {
     for (auto op : ope.opes_) {
       if (!IsLiteralToken::check(*op)) { return; }
@@ -1779,6 +1811,8 @@ private:
 };
 
 struct TokenChecker : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   void visit(Sequence &ope) override {
     for (auto op : ope.opes_) {
       op->accept(*this);
@@ -1815,6 +1849,8 @@ private:
 };
 
 struct FindLiteralToken : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   void visit(LiteralString &ope) override { token_ = ope.lit_.data(); }
   void visit(TokenBoundary &ope) override { ope.ope_->accept(*this); }
   void visit(Ignore &ope) override { ope.ope_->accept(*this); }
@@ -1832,6 +1868,8 @@ private:
 };
 
 struct DetectLeftRecursion : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   DetectLeftRecursion(const std::string &name) : name_(name) {}
 
   void visit(Sequence &ope) override {
@@ -1894,6 +1932,8 @@ private:
 };
 
 struct HasEmptyElement : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   HasEmptyElement(std::vector<std::pair<const char *, std::string>> &refs,
                   std::unordered_map<std::string, bool> &has_error_cache)
       : refs_(refs), has_error_cache_(has_error_cache) {}
@@ -1942,6 +1982,8 @@ private:
 };
 
 struct DetectInfiniteLoop : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   DetectInfiniteLoop(const char *s, const std::string &name,
                      std::vector<std::pair<const char *, std::string>> &refs,
                      std::unordered_map<std::string, bool> &has_error_cache)
@@ -2001,6 +2043,8 @@ private:
 };
 
 struct ReferenceChecker : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   ReferenceChecker(const Grammar &grammar,
                    const std::vector<std::string> &params)
       : grammar_(grammar), params_(params) {}
@@ -2039,6 +2083,8 @@ private:
 };
 
 struct LinkReferences : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   LinkReferences(Grammar &grammar, const std::vector<std::string> &params)
       : grammar_(grammar), params_(params) {}
 
@@ -2072,6 +2118,8 @@ private:
 };
 
 struct FindReference : public Ope::Visitor {
+  using Ope::Visitor::visit;
+
   FindReference(const std::vector<std::shared_ptr<Ope>> &args,
                 const std::vector<std::string> &params)
       : args_(args), params_(params) {}
@@ -2546,7 +2594,7 @@ inline size_t parse_literal(const char *s, size_t n, SemanticValues &vs,
     }
   }
 
-  // Skip whiltespace
+  // Skip whitespace
   if (!c.in_token_boundary_count && c.whitespaceOpe) {
     auto save_ignore_trace_state = c.ignore_trace_state;
     c.ignore_trace_state = !c.verbose_trace;
@@ -2702,11 +2750,16 @@ inline size_t Ope::parse(const char *s, size_t n, SemanticValues &vs,
 inline size_t Dictionary::parse_core(const char *s, size_t n,
                                      SemanticValues &vs, Context &c,
                                      std::any &dt) const {
-  auto i = trie_.match(s, n);
+  size_t id;
+  auto i = trie_.match(s, n, id);
+
   if (i == 0) {
     c.set_error_pos(s);
     return static_cast<size_t>(-1);
   }
+
+  vs.choice_count_ = trie_.size();
+  vs.choice_ = id;
 
   // Word check
   if (c.wordOpe) {
@@ -2731,7 +2784,7 @@ inline size_t Dictionary::parse_core(const char *s, size_t n,
     }
   }
 
-  // Skip whiltespace
+  // Skip whitespace
   if (!c.in_token_boundary_count && c.whitespaceOpe) {
     auto save_ignore_trace_state = c.ignore_trace_state;
     c.ignore_trace_state = !c.verbose_trace;
@@ -2816,7 +2869,13 @@ inline size_t Holder::parse_core(const char *s, size_t n, SemanticValues &vs,
       chvs.sv_ = std::string_view(s, len);
       chvs.name_ = outer_->name;
 
-      if (!dynamic_cast<const peg::PrioritizedChoice *>(ope_.get())) {
+      auto ope_ptr = ope_.get();
+      {
+        auto tok_ptr = dynamic_cast<const peg::TokenBoundary *>(ope_ptr);
+        if (tok_ptr) { ope_ptr = tok_ptr->ope_.get(); }
+      }
+      if (!dynamic_cast<const peg::PrioritizedChoice *>(ope_ptr) &&
+          !dynamic_cast<const peg::Dictionary *>(ope_ptr)) {
         chvs.choice_count_ = 0;
         chvs.choice_ = 0;
       }
@@ -3316,7 +3375,7 @@ public:
     return parse(s, n, dummy, start, enablePackratParsing, preamble, log);
   }
 
-  // For debuging purpose
+  // For debugging purpose
   static Grammar &grammar() { return get_instance().g; }
 
   static ParserGenerator &get_instance() {
@@ -3376,19 +3435,20 @@ private:
         seq(g["Suffix"], opt(seq(g["LABEL"], g["Identifier"])));
     g["Suffix"] <= seq(g["Primary"], opt(g["Loop"]));
     g["Loop"] <= cho(g["QUESTION"], g["STAR"], g["PLUS"], g["Repetition"]);
-    g["Primary"] <=
-        cho(seq(g["Ignore"], g["IdentCont"], g["Arguments"],
-                npd(g["LEFTARROW"])),
-            seq(g["Ignore"], g["Identifier"],
-                npd(seq(opt(g["Parameters"]), g["LEFTARROW"]))),
-            seq(g["OPEN"], g["Expression"], g["CLOSE"]),
-            seq(g["BeginTok"], g["Expression"], g["EndTok"]), g["CapScope"],
-            seq(g["BeginCap"], g["Expression"], g["EndCap"]), g["BackRef"],
-            g["LiteralI"], g["Dictionary"], g["Literal"], g["NegatedClassI"],
-            g["NegatedClass"], g["ClassI"], g["Class"], g["DOT"]);
+    g["Primary"] <= cho(seq(g["Ignore"], g["IdentCont"], g["Arguments"],
+                            npd(g["LEFTARROW"])),
+                        seq(g["Ignore"], g["Identifier"],
+                            npd(seq(opt(g["Parameters"]), g["LEFTARROW"]))),
+                        seq(g["OPEN"], g["Expression"], g["CLOSE"]),
+                        seq(g["BeginTok"], g["Expression"], g["EndTok"]),
+                        g["CapScope"],
+                        seq(g["BeginCap"], g["Expression"], g["EndCap"]),
+                        g["BackRef"], g["DictionaryI"], g["LiteralI"],
+                        g["Dictionary"], g["Literal"], g["NegatedClassI"],
+                        g["NegatedClass"], g["ClassI"], g["Class"], g["DOT"]);
 
     g["Identifier"] <= seq(g["IdentCont"], g["Spacing"]);
-    g["IdentCont"] <= seq(g["IdentStart"], zom(g["IdentRest"]));
+    g["IdentCont"] <= tok(seq(g["IdentStart"], zom(g["IdentRest"])));
 
     const static std::vector<std::pair<char32_t, char32_t>> range = {
         {0x0080, 0xFFFF}};
@@ -3399,6 +3459,9 @@ private:
 
     g["Dictionary"] <= seq(g["LiteralD"], oom(seq(g["PIPE"], g["LiteralD"])));
 
+    g["DictionaryI"] <=
+        seq(g["LiteralID"], oom(seq(g["PIPE"], g["LiteralID"])));
+
     auto lit_ope = cho(seq(cls("'"), tok(zom(seq(npd(cls("'")), g["Char"]))),
                            cls("'"), g["Spacing"]),
                        seq(cls("\""), tok(zom(seq(npd(cls("\"")), g["Char"]))),
@@ -3406,11 +3469,13 @@ private:
     g["Literal"] <= lit_ope;
     g["LiteralD"] <= lit_ope;
 
-    g["LiteralI"] <=
+    auto lit_case_ignore_ope =
         cho(seq(cls("'"), tok(zom(seq(npd(cls("'")), g["Char"]))), lit("'i"),
                 g["Spacing"]),
             seq(cls("\""), tok(zom(seq(npd(cls("\"")), g["Char"]))), lit("\"i"),
                 g["Spacing"]));
+    g["LiteralI"] <= lit_case_ignore_ope;
+    g["LiteralID"] <= lit_case_ignore_ope;
 
     // NOTE: The original Brian Ford's paper uses 'zom' instead of 'oom'.
     g["Class"] <= seq(chr('['), npd(chr('^')),
@@ -3444,7 +3509,7 @@ private:
             seq(npd(chr('\\')), dot()));
 
     g["Repetition"] <=
-        seq(g["BeginBlacket"], g["RepetitionRange"], g["EndBlacket"]);
+        seq(g["BeginBracket"], g["RepetitionRange"], g["EndBracket"]);
     g["RepetitionRange"] <= cho(seq(g["Number"], g["COMMA"], g["Number"]),
                                 seq(g["Number"], g["COMMA"]), g["Number"],
                                 seq(g["COMMA"], g["Number"]));
@@ -3496,18 +3561,18 @@ private:
 
     // Instruction grammars
     g["Instruction"] <=
-        seq(g["BeginBlacket"],
+        seq(g["BeginBracket"],
             opt(seq(g["InstructionItem"], zom(seq(g["InstructionItemSeparator"],
                                                   g["InstructionItem"])))),
-            g["EndBlacket"]);
+            g["EndBracket"]);
     g["InstructionItem"] <=
         cho(g["PrecedenceClimbing"], g["ErrorMessage"], g["NoAstOpt"]);
     ~g["InstructionItemSeparator"] <= seq(chr(';'), g["Spacing"]);
 
     ~g["SpacesZom"] <= zom(g["Space"]);
     ~g["SpacesOom"] <= oom(g["Space"]);
-    ~g["BeginBlacket"] <= seq(chr('{'), g["Spacing"]);
-    ~g["EndBlacket"] <= seq(chr('}'), g["Spacing"]);
+    ~g["BeginBracket"] <= seq(chr('{'), g["Spacing"]);
+    ~g["EndBracket"] <= seq(chr('}'), g["Spacing"]);
 
     // PrecedenceClimbing instruction
     g["PrecedenceClimbing"] <=
@@ -3531,7 +3596,7 @@ private:
     g["ErrorMessage"] <= seq(lit("error_message"), g["SpacesOom"],
                              g["LiteralD"], g["SpacesZom"]);
 
-    // No Ast node optimazation instruction
+    // No Ast node optimization instruction
     g["NoAstOpt"] <= seq(lit("no_ast_opt"), g["SpacesZom"]);
 
     // Codon: C++ code support
@@ -3800,7 +3865,11 @@ private:
 
     g["Dictionary"] = [](const SemanticValues &vs) {
       auto items = vs.transform<std::string>();
-      return dic(items);
+      return dic(items, false);
+    };
+    g["DictionaryI"] = [](const SemanticValues &vs) {
+      auto items = vs.transform<std::string>();
+      return dic(items, true);
     };
 
     g["Literal"] = [](const SemanticValues &vs) {
@@ -3812,6 +3881,10 @@ private:
       return liti(resolve_escape_sequence(tok.data(), tok.size()));
     };
     g["LiteralD"] = [](const SemanticValues &vs) {
+      auto &tok = vs.tokens.front();
+      return resolve_escape_sequence(tok.data(), tok.size());
+    };
+    g["LiteralID"] = [](const SemanticValues &vs) {
       auto &tok = vs.tokens.front();
       return resolve_escape_sequence(tok.data(), tok.size());
     };
@@ -4653,8 +4726,8 @@ public:
                const char *path = nullptr) const {
     if (grammar_ != nullptr) {
       const auto &rule = (*grammar_)[start_];
-      return post_process(s, n,
-                          rule.parse_and_get_value(s, n, dt, val, path, log_));
+      auto result = rule.parse_and_get_value(s, n, dt, val, path, log_);
+      return post_process(s, n, result);
     }
     return false;
   }
@@ -4800,7 +4873,7 @@ private:
 inline void enable_tracing(parser &parser, std::ostream &os) {
   parser.enable_trace(
       [&](auto &ope, auto s, auto, auto &, auto &c, auto &, auto &trace_data) {
-	auto prev_pos = std::any_cast<size_t>(trace_data);
+        auto prev_pos = std::any_cast<size_t>(trace_data);
         auto pos = static_cast<size_t>(s - c.s);
         auto backtrack = (pos < prev_pos ? "*" : "");
         std::string indent;
@@ -4924,8 +4997,8 @@ inline void enable_profiling(parser &parser, std::ostream &os) {
                      "Total counters");
             os << buff << std::endl;
 
-            snprintf(buff, BUFSIZ, "%4s  %10s  %5s  %10.2f  %10.2f  %s", "",
-                     "", "", total_success * 100.0 / grand_total,
+            snprintf(buff, BUFSIZ, "%4s  %10s  %5s  %10.2f  %10.2f  %s", "", "",
+                     "", total_success * 100.0 / grand_total,
                      total_fail * 100.0 / grand_total, "% success/fail");
             os << buff << std::endl << std::endl;
             ;
@@ -4934,8 +5007,8 @@ inline void enable_profiling(parser &parser, std::ostream &os) {
             for (auto &[name, success, fail] : stats.items) {
               auto total = success + fail;
               auto ratio = total * 100.0 / stats.total;
-              snprintf(buff, BUFSIZ, "%4zu  %10zu  %5.2f  %10zu  %10zu  %s",
-                       id, total, ratio, success, fail, name.c_str());
+              snprintf(buff, BUFSIZ, "%4zu  %10zu  %5.2f  %10zu  %10zu  %s", id,
+                       total, ratio, success, fail, name.c_str());
               os << buff << std::endl;
               id++;
             }

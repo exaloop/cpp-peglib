@@ -2,7 +2,7 @@ cpp-peglib
 ==========
 
 [![](https://github.com/yhirose/cpp-peglib/workflows/CMake/badge.svg)](https://github.com/yhirose/cpp-peglib/actions)
-[![Bulid Status](https://ci.appveyor.com/api/projects/status/github/yhirose/cpp-peglib?branch=master&svg=true)](https://ci.appveyor.com/project/yhirose/cpp-peglib)
+[![Build Status](https://ci.appveyor.com/api/projects/status/github/yhirose/cpp-peglib?branch=master&svg=true)](https://ci.appveyor.com/project/yhirose/cpp-peglib)
 
 C++17 header-only [PEG](http://en.wikipedia.org/wiki/Parsing_expression_grammar) (Parsing Expression Grammars) library. You can start using it right away just by including `peglib.h` in your project.
 
@@ -33,13 +33,15 @@ The PEG syntax is well described on page 2 in the [document](http://www.brynosau
   * `%recovery(` ... `)` (Error recovery operator)
   * `exp⇑label` or `exp^label` (Syntax sugar for `(exp / %recover(label))`)
   * `label { error_message "..." }` (Error message instruction)
-  * `{ no_ast_opt }` (No AST node optimazation instruction)
+  * `{ no_ast_opt }` (No AST node optimization instruction)
 
 'End of Input' check will be done as default. In order to disable the check, please call `disable_eoi_check`.
 
 This library supports the linear-time parsing known as the [*Packrat*](http://pdos.csail.mit.edu/~baford/packrat/thesis/thesis.pdf) parsing.
 
   IMPORTANT NOTE for some Linux distributions such as Ubuntu and CentOS: Need `-pthread` option when linking. See [#23](https://github.com/yhirose/cpp-peglib/issues/23#issuecomment-261126127), [#46](https://github.com/yhirose/cpp-peglib/issues/46#issuecomment-417870473) and [#62](https://github.com/yhirose/cpp-peglib/issues/62#issuecomment-492032680).
+
+I am sure that you will enjoy this excellent ["Practical parsing with PEG and cpp-peglib"](https://berthub.eu/articles/posts/practical-peg-parsing/) article by [bert hubert](https://berthub.eu/)!
 
 How to use
 ----------
@@ -59,8 +61,8 @@ int main(void) {
   // (2) Make a parser
   parser parser(R"(
     # Grammar for Calculator...
-    Additive    <- Multitive '+' Additive / Multitive
-    Multitive   <- Primary '*' Multitive / Primary
+    Additive    <- Multiplicative '+' Additive / Multiplicative
+    Multiplicative   <- Primary '*' Multiplicative / Primary
     Primary     <- '(' Additive ')' / Number
     Number      <- < [0-9]+ >
     %whitespace <- [ \t]*
@@ -71,16 +73,16 @@ int main(void) {
   // (3) Setup actions
   parser["Additive"] = [](const SemanticValues &vs) {
     switch (vs.choice()) {
-    case 0: // "Multitive '+' Additive"
+    case 0: // "Multiplicative '+' Additive"
       return any_cast<int>(vs[0]) + any_cast<int>(vs[1]);
-    default: // "Multitive"
+    default: // "Multiplicative"
       return any_cast<int>(vs[0]);
     }
   };
 
-  parser["Multitive"] = [](const SemanticValues &vs) {
+  parser["Multiplicative"] = [](const SemanticValues &vs) {
     switch (vs.choice()) {
-    case 0: // "Primary '*' Multitive"
+    case 0: // "Primary '*' Multiplicative"
       return any_cast<int>(vs[0]) * any_cast<int>(vs[1]);
     default: // "Primary"
       return any_cast<int>(vs[0]);
@@ -106,8 +108,8 @@ To show syntax errors in grammar text:
 ```cpp
 auto grammar = R"(
   # Grammar for Calculator...
-  Additive    <- Multitive '+' Additive / Multitive
-  Multitive   <- Primary '*' Multitive / Primary
+  Additive    <- Multiplicative '+' Additive / Multiplicative
+  Multiplicative   <- Primary '*' Multiplicative / Primary
   Primary     <- '(' Additive ')' / Number
   Number      <- < [0-9]+ >
   %whitespace <- [ \t]*
@@ -247,7 +249,7 @@ assert(ret == false);
 *enter* and *leave* actions are also available.
 
 ```cpp
-parser["RULE"].enter = [](const char* s, size_t n, any& dt) {
+parser["RULE"].enter = [](const Context &c, const char* s, size_t n, any& dt) {
   std::cout << "enter" << std::endl;
 };
 
@@ -255,7 +257,7 @@ parser["RULE"] = [](const SemanticValues& vs, any& dt) {
   std::cout << "action!" << std::endl;
 };
 
-parser["RULE"].leave = [](const char* s, size_t n, size_t matchlen, any& value, any& dt) {
+parser["RULE"].leave = [](const Context &c, const char* s, size_t n, size_t matchlen, any& value, any& dt) {
   std::cout << "leave" << std::endl;
 };
 ```
@@ -345,6 +347,21 @@ Dictionary
 ```peg
 START <- 'This month is ' MONTH '.'
 MONTH <- 'Jan' | 'January' | 'Feb' | 'February' | '...'
+```
+
+We are able to find which item is matched with `choice()`.
+
+```cpp
+parser["MONTH"] = [](const SemanticValues &vs) {
+  auto id = vs.choice();
+};
+```
+
+It supports the case insensitive mode.
+
+```peg
+START <- 'This month is ' MONTH '.'
+MONTH <- 'Jan'i | 'January'i | 'Feb'i | 'February'i | '...'i
 ```
 
 Cut operator
@@ -447,8 +464,8 @@ NOTE: An AST node holds a corresponding token as `std::string_vew` for performan
 ```
 peg::parser parser(R"(
   ...
-  defenition1 <- ... { no_ast_opt }
-  defenition2 <- ... { no_ast_opt }
+  definition1 <- ... { no_ast_opt }
+  definition2 <- ... { no_ast_opt }
   ...
 )");
 
@@ -659,27 +676,27 @@ usage: grammar_file_path [source_file_path]
 
 ```
 > cat a.peg
-Additive    <- Multitive '+' Additive / Multitive
-Multitive   <- Primary '*' Multitive / Primary
+Additive    <- Multiplicative '+' Additive / Multiplicative
+Multiplicative   <- Primary '*' Multiplicative / Primary
 Primary     <- '(' Additive ')' / Number
 %whitespace <- [ \t\r\n]*
 
 > peglint a.peg
-[commendline]:3:35: 'Number' is not defined.
+[commandline]:3:35: 'Number' is not defined.
 ```
 
 ### Source check
 
 ```
 > cat a.peg
-Additive    <- Multitive '+' Additive / Multitive
-Multitive   <- Primary '*' Multitive / Primary
+Additive    <- Multiplicative '+' Additive / Multiplicative
+Multiplicative   <- Primary '*' Multiplicative / Primary
 Primary     <- '(' Additive ')' / Number
 Number      <- < [0-9]+ >
 %whitespace <- [ \t\r\n]*
 
 > peglint --source "1 + a * 3" a.peg
-[commendline]:1:3: syntax error
+[commandline]:1:3: syntax error
 ```
 
 ### AST
@@ -690,57 +707,57 @@ Number      <- < [0-9]+ >
 
 > peglint --ast a.peg a.txt
 + Additive
-  + Multitive
+  + Multiplicative
     + Primary
       - Number (1)
   + Additive
-    + Multitive
+    + Multiplicative
       + Primary
         - Number (2)
-      + Multitive
+      + Multiplicative
         + Primary
           - Number (3)
 ```
 
-### AST optimazation
+### AST optimization
 
 ```
 > peglint --ast --opt --source "1 + 2 * 3" a.peg
 + Additive
-  - Multitive[Number] (1)
-  + Additive[Multitive]
+  - Multiplicative[Number] (1)
+  + Additive[Multiplicative]
     - Primary[Number] (2)
-    - Multitive[Number] (3)
+    - Multiplicative[Number] (3)
 ```
 
-### Adjust AST optimazation with `no_ast_opt` instruction
+### Adjust AST optimization with `no_ast_opt` instruction
 
 ```
 > cat a.peg
-Additive    <- Multitive '+' Additive / Multitive
-Multitive   <- Primary '*' Multitive / Primary
+Additive    <- Multiplicative '+' Additive / Multiplicative
+Multiplicative   <- Primary '*' Multiplicative / Primary
 Primary     <- '(' Additive ')' / Number          { no_ast_opt }
 Number      <- < [0-9]+ >
 %whitespace <- [ \t\r\n]*
 
 > peglint --ast --opt --source "1 + 2 * 3" a.peg
 + Additive/0
-  + Multitive/1[Primary]
+  + Multiplicative/1[Primary]
     - Number (1)
-  + Additive/1[Multitive]
+  + Additive/1[Multiplicative]
     + Primary/1
       - Number (2)
-    + Multitive/1[Primary]
+    + Multiplicative/1[Primary]
       - Number (3)
 
 > peglint --ast --opt-only --source "1 + 2 * 3" a.peg
 + Additive/0
-  + Multitive/1
+  + Multiplicative/1
     - Primary/1[Number] (1)
   + Additive/1
-    + Multitive/0
+    + Multiplicative/0
       - Primary/1[Number] (2)
-      + Multitive/1
+      + Multiplicative/1
         - Primary/1[Number] (3)
 ```
 
