@@ -3601,7 +3601,7 @@ private:
 
     // Codon: C++ code support
     g["CppInstr"] <= seq(g["CppCode"], g["Spacing"]);
-    g["CppCode"] <= seq(chr('{'), zom(g["CppChar"]), chr('}'));
+    g["CppCode"] <= tok(seq(chr('{'), zom(g["CppChar"]), chr('}')));
     g["CppChar"] <= cho(g["CppCode"], seq(npd(chr('{')), npd(chr('}')), dot()));
 
     // Set definition names
