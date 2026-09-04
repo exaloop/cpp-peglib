@@ -561,6 +561,11 @@ struct SemanticValues : public std::vector<std::any> {
 
   void append(SemanticValues &chvs) {
     sv_ = chvs.sv_;
+    // Semantic values are accumulated through many small PEG scopes. Reserve once
+    // per append so values, tags and token captures do not repeatedly reallocate.
+    reserve(size() + chvs.size());
+    tags.reserve(tags.size() + chvs.tags.size());
+    tokens.reserve(tokens.size() + chvs.tokens.size());
     for (auto &v : chvs) {
       emplace_back(std::move(v));
     }
@@ -793,6 +798,7 @@ public:
 
   const size_t def_count;
   const bool enablePackratParsing;
+  const bool enableCaptureScope;
   std::vector<bool> cache_registered;
   std::vector<bool> cache_success;
 
@@ -808,22 +814,23 @@ public:
 
   Context(const char *path, const char *s, size_t l, size_t def_count,
           std::shared_ptr<Ope> whitespaceOpe, std::shared_ptr<Ope> wordOpe,
-          bool enablePackratParsing, TracerEnter tracer_enter,
-          TracerLeave tracer_leave, std::any trace_data, bool verbose_trace,
-          Log log)
+          bool enablePackratParsing, bool enableCaptureScope,
+          TracerEnter tracer_enter, TracerLeave tracer_leave,
+          std::any trace_data, bool verbose_trace, Log log)
       : path(path), s(s), l(l), whitespaceOpe(whitespaceOpe), wordOpe(wordOpe),
         def_count(def_count), enablePackratParsing(enablePackratParsing),
+        enableCaptureScope(enableCaptureScope),
         cache_registered(enablePackratParsing ? def_count * (l + 1) : 0),
         cache_success(enablePackratParsing ? def_count * (l + 1) : 0),
         tracer_enter(tracer_enter), tracer_leave(tracer_leave),
         trace_data(trace_data), verbose_trace(verbose_trace), log(log) {
 
     push_args({});
-    push_capture_scope();
+    if (enableCaptureScope) { push_capture_scope(); }
   }
 
   ~Context() {
-    pop_capture_scope();
+    if (enableCaptureScope) { pop_capture_scope(); }
 
     assert(!value_stack_size);
     assert(!capture_scope_stack_size);
@@ -867,12 +874,12 @@ public:
   }
 
   SemanticValues &push() {
-    push_capture_scope();
+    if (enableCaptureScope) { push_capture_scope(); }
     return push_semantic_values_scope();
   }
 
   void pop() {
-    pop_capture_scope();
+    if (enableCaptureScope) { pop_capture_scope(); }
     pop_semantic_values_scope();
   }
 
@@ -903,7 +910,7 @@ public:
 
   // Arguments
   void push_args(std::vector<std::shared_ptr<Ope>> &&args) {
-    args_stack.emplace_back(args);
+    args_stack.emplace_back(std::move(args));
   }
 
   void pop_args() { args_stack.pop_back(); }
@@ -928,6 +935,7 @@ public:
   void pop_capture_scope() { capture_scope_stack_size--; }
 
   void shift_capture_values() {
+    if (!enableCaptureScope) { return; }
     assert(capture_scope_stack_size >= 2);
     auto curr = &capture_scope_stack[capture_scope_stack_size - 1];
     auto prev = curr - 1;
@@ -2401,6 +2409,10 @@ public:
   std::shared_ptr<Ope> whitespaceOpe;
   std::shared_ptr<Ope> wordOpe;
   bool enablePackratParsing = false;
+  // Grammars without Capture/BackReference operators can opt out of maintaining
+  // an otherwise unused capture map for every choice and repetition. This stays
+  // enabled by default to preserve existing parser behavior.
+  bool enableCaptureScope = true;
   bool is_macro = false;
   std::vector<std::string> params;
   bool disable_action = false;
@@ -2449,8 +2461,8 @@ private:
     });
 
     Context c(path, s, n, definition_ids_.size(), whitespaceOpe, wordOpe,
-              enablePackratParsing, tracer_enter, tracer_leave, trace_data,
-              verbose_trace, log);
+              enablePackratParsing, enableCaptureScope, tracer_enter,
+              tracer_leave, trace_data, verbose_trace, log);
 
     size_t i = 0;
 
@@ -2569,8 +2581,8 @@ inline size_t parse_literal(const char *s, size_t n, SemanticValues &vs,
 
     std::call_once(init_is_word, [&]() {
       SemanticValues dummy_vs;
-      Context dummy_c(nullptr, c.s, c.l, 0, nullptr, nullptr, false, nullptr,
-                      nullptr, nullptr, false, nullptr);
+      Context dummy_c(nullptr, c.s, c.l, 0, nullptr, nullptr, false, true,
+                      nullptr, nullptr, nullptr, false, nullptr);
       std::any dummy_dt;
 
       auto len =
@@ -2580,8 +2592,8 @@ inline size_t parse_literal(const char *s, size_t n, SemanticValues &vs,
 
     if (is_word) {
       SemanticValues dummy_vs;
-      Context dummy_c(nullptr, c.s, c.l, 0, nullptr, nullptr, false, nullptr,
-                      nullptr, nullptr, false, nullptr);
+      Context dummy_c(nullptr, c.s, c.l, 0, nullptr, nullptr, false, true,
+                      nullptr, nullptr, nullptr, false, nullptr);
       std::any dummy_dt;
 
       NotPredicate ope(c.wordOpe);
@@ -2770,8 +2782,8 @@ inline size_t Dictionary::parse_core(const char *s, size_t n,
 
     {
       SemanticValues dummy_vs;
-      Context dummy_c(nullptr, c.s, c.l, 0, nullptr, nullptr, false, nullptr,
-                      nullptr, nullptr, false, nullptr);
+      Context dummy_c(nullptr, c.s, c.l, 0, nullptr, nullptr, false, true,
+                      nullptr, nullptr, nullptr, false, nullptr);
       std::any dummy_dt;
 
       NotPredicate ope(c.wordOpe);
@@ -2965,8 +2977,14 @@ inline size_t Reference::parse_core(const char *s, size_t n, SemanticValues &vs,
       return ope->parse(s, n, vs, c, dt);
     } else {
       // Definition
-      c.push_args(std::vector<std::shared_ptr<Ope>>());
-      auto se = scope_exit([&]() { c.pop_args(); });
+      // An empty argument frame is only needed to mask parameters while leaving a
+      // macro. Ordinary definition-to-definition calls already have an empty top
+      // frame, so avoid a vector construction and stack push/pop for every call.
+      auto mask_macro_args = !c.top_args().empty();
+      if (mask_macro_args) { c.push_args(std::vector<std::shared_ptr<Ope>>()); }
+      auto se = scope_exit([&]() {
+        if (mask_macro_args) { c.pop_args(); }
+      });
       auto ope = get_core_operator();
       return ope->parse(s, n, vs, c, dt);
     }
